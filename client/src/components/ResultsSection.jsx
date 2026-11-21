@@ -1,5 +1,5 @@
 import React from 'react';
-import { ArrowUp, FileText, CheckCircle2 } from 'lucide-react';
+import { ArrowUp, FileText, CheckCircle2, Zap } from 'lucide-react';
 import RiskMeter from './RiskMeter';
 import IndicatorsList from './IndicatorsList';
 import RecommendationsList from './RecommendationsList';
@@ -12,9 +12,15 @@ export default function ResultsSection({ result, onAnalyzeAnother }) {
     <section className="results-container" id="analysis-results">
       <div className="results-header-bar">
         <div className="results-title-group">
-          <span className="results-badge">
-            <CheckCircle2 size={13} className="text-teal" /> Analysis Complete
-          </span>
+          {result.isFallback ? (
+            <span className="results-badge results-badge-fallback">
+              <Zap size={13} className="text-amber" /> Rule-based Fallback Analysis
+            </span>
+          ) : (
+            <span className="results-badge">
+              <CheckCircle2 size={13} className="text-teal" /> AI Analysis Complete
+            </span>
+          )}
           <h2 className="results-main-title">Threat Assessment Report</h2>
         </div>
 

@@ -631,6 +631,16 @@ body {
   text-transform: uppercase;
   letter-spacing: 0.06em;
   margin-bottom: 4px;
+  padding: 3px 10px;
+  background: rgba(20, 184, 166, 0.1);
+  border: 1px solid rgba(20, 184, 166, 0.25);
+  border-radius: 9999px;
+}
+
+.results-badge-fallback {
+  color: #fbbf24;
+  border-color: rgba(245, 158, 11, 0.35);
+  background: rgba(245, 158, 11, 0.12);
 }
 
 .results-main-title {

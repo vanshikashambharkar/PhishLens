@@ -2,13 +2,13 @@ const express = require('express');
 const cors = require('cors');
 const path = require('path');
 const { GoogleGenAI, Type } = require('@google/genai');
+const { analyzeWithFallbackRules } = require('./fallbackAnalyzer');
 
 // Load environment variables from server/.env
 require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
 
 const app = express();
 const PORT = process.env.PORT || 5000;
-// Default to gemini-3.5-flash-lite for fast, reliable response times without 503 capacity delays
 const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-3.5-flash-lite';
 
 // Middleware
@@ -96,89 +96,104 @@ function parseAnalysisResponse(raw) {
   }
 }
 
-// POST /api/analyze - Analyzes suspicious message text with Gemini
+// POST /api/analyze - Primary Gemini AI analysis with automatic rule-based fallback
 app.post('/api/analyze', async (req, res) => {
   const requestStartTime = Date.now();
-  try {
-    const { text } = req.body;
 
-    // 1. Validate input text
-    if (!text || typeof text !== 'string' || text.trim().length === 0) {
-      return res.status(400).json({
-        error: 'Invalid request: "text" field is required and must not be empty.'
-      });
-    }
+  // 1. Validate input text
+  const { text } = req.body || {};
+  if (!text || typeof text !== 'string' || text.trim().length === 0) {
+    return res.status(400).json({
+      error: 'Invalid request: "text" field is required and must not be empty.'
+    });
+  }
 
-    const trimmedText = text.trim();
+  const trimmedText = text.trim();
 
-    if (trimmedText.length > 50000) {
-      return res.status(400).json({
-        error: 'Message exceeds maximum supported length (50,000 characters).'
-      });
-    }
+  if (trimmedText.length > 50000) {
+    return res.status(400).json({
+      error: 'Message exceeds maximum supported length (50,000 characters).'
+    });
+  }
 
-    // 2. Validate Gemini API Key
-    const apiKey = process.env.GEMINI_API_KEY;
-    if (!apiKey || apiKey.trim() === '') {
-      return res.status(500).json({
-        error: 'Gemini API key is not configured. Please add your GEMINI_API_KEY in server/.env and restart the server.'
-      });
-    }
+  const apiKey = process.env.GEMINI_API_KEY;
 
-    // 3. Initialize GoogleGenAI client (key kept strictly on the backend)
-    const ai = new GoogleGenAI({ apiKey: apiKey.trim() });
-
-    // 4. Send request to Gemini with injection protection and 20s timeout
-    const prompt = `Analyze for phishing:\n<<<MESSAGE_START>>>\n${trimmedText}\n<<<MESSAGE_END>>>`;
-    const targetModel = GEMINI_MODEL;
-
-    console.log(`[PhishLens AI] Starting analysis for text (${trimmedText.length} chars) using model: ${targetModel}`);
-
-    // Set a strict 20-second request timeout controller to prevent hanging
-    const abortController = new AbortController();
-    const timeoutId = setTimeout(() => {
-      console.warn(`[PhishLens AI] Request timed out after 20s on model: ${targetModel}`);
-      abortController.abort();
-    }, 20000);
-
-    let response;
+  // 2. Primary Engine: Attempt Gemini AI Analysis
+  if (apiKey && apiKey.trim() !== '') {
     try {
-      response = await ai.models.generateContent({
-        model: targetModel,
-        contents: prompt,
-        config: {
-          systemInstruction: SYSTEM_INSTRUCTION,
-          responseMimeType: 'application/json',
-          responseSchema: analysisSchema,
-          maxOutputTokens: 600,
-          httpOptions: { timeout: 20000 },
-          abortSignal: abortController.signal
-        }
-      });
-    } finally {
-      clearTimeout(timeoutId);
+      const ai = new GoogleGenAI({ apiKey: apiKey.trim() });
+      const prompt = `Analyze for phishing:\n<<<MESSAGE_START>>>\n${trimmedText}\n<<<MESSAGE_END>>>`;
+      const targetModel = GEMINI_MODEL;
+
+      console.log(`[PhishLens AI] Primary Engine: analyzing ${trimmedText.length} chars with ${targetModel}...`);
+
+      // 12-second timeout for Gemini to prevent long user waiting when free-tier queues spike
+      const abortController = new AbortController();
+      const timeoutId = setTimeout(() => {
+        console.warn(`[PhishLens AI] Gemini (${targetModel}) timed out after 12s. Tripping fallback...`);
+        abortController.abort();
+      }, 12000);
+
+      let response;
+      try {
+        response = await ai.models.generateContent({
+          model: targetModel,
+          contents: prompt,
+          config: {
+            systemInstruction: SYSTEM_INSTRUCTION,
+            responseMimeType: 'application/json',
+            responseSchema: analysisSchema,
+            maxOutputTokens: 600,
+            httpOptions: { timeout: 12000 },
+            abortSignal: abortController.signal
+          }
+        });
+      } finally {
+        clearTimeout(timeoutId);
+      }
+
+      const durationMs = Date.now() - requestStartTime;
+      console.log(`[PhishLens AI] Gemini AI completed successfully in ${durationMs}ms`);
+
+      const result = parseAnalysisResponse(response.text);
+      result.engine = 'Gemini AI';
+      result.isFallback = false;
+
+      return res.status(200).json(result);
+
+    } catch (aiError) {
+      const isUnavailableOrTimeout =
+        aiError.status === 503 ||
+        aiError.status === 429 ||
+        aiError.status === 504 ||
+        aiError.name === 'AbortError' ||
+        aiError.message?.includes('503') ||
+        aiError.message?.includes('429') ||
+        aiError.message?.includes('high demand') ||
+        aiError.message?.includes('aborted') ||
+        aiError.message?.includes('timeout') ||
+        aiError.message?.includes('DEADLINE_EXCEEDED');
+
+      console.warn(
+        `[PhishLens AI] Primary AI unavailable (${aiError.message || aiError.status}). Activating rule-based fallback analyzer...`
+      );
     }
+  } else {
+    console.warn('[PhishLens AI] GEMINI_API_KEY is not configured. Using rule-based fallback analyzer...');
+  }
 
+  // 3. Fallback Engine: Fast, reliable rule-based cybersecurity analysis
+  try {
+    const fallbackResult = analyzeWithFallbackRules(trimmedText);
     const durationMs = Date.now() - requestStartTime;
-    console.log(`[PhishLens AI] Gemini (${targetModel}) analysis completed in ${durationMs}ms`);
+    console.log(`[PhishLens AI] Fallback analysis completed in ${durationMs}ms (Risk: ${fallbackResult.riskLevel}, Score: ${fallbackResult.riskScore})`);
 
-    // 5. Parse and return the structured response
-    const result = parseAnalysisResponse(response.text);
-    return res.status(200).json(result);
-
-  } catch (error) {
-    const elapsedMs = Date.now() - requestStartTime;
-    console.error(`[PhishLens AI] Analysis failed after ${elapsedMs}ms:`, error.message || error);
-
-    // Provide clean, friendly error message to the frontend
-    const isTimeout = error.name === 'AbortError' || error.message?.includes('aborted') || error.message?.includes('timeout');
-    const statusCode = isTimeout ? 504 : (error.status || 500);
-
-    return res.status(statusCode).json({
-      error: isTimeout
-        ? 'Analysis request timed out after 20 seconds. The AI service is currently slow or busy. Please try again.'
-        : 'Failed to complete message analysis.',
-      details: error.message || 'An unexpected error occurred.'
+    return res.status(200).json(fallbackResult);
+  } catch (fallbackError) {
+    console.error('[PhishLens AI] Fatal fallback error:', fallbackError);
+    return res.status(500).json({
+      error: 'Failed to complete message analysis.',
+      details: fallbackError.message || 'An unexpected analysis error occurred.'
     });
   }
 });
@@ -187,7 +202,8 @@ app.post('/api/analyze', async (req, res) => {
 if (require.main === module) {
   app.listen(PORT, () => {
     console.log(`PhishLens AI Server is running on port ${PORT}`);
-    console.log(`Using Gemini model: ${GEMINI_MODEL}`);
+    console.log(`Primary Engine: Gemini (${GEMINI_MODEL})`);
+    console.log(`Fallback Engine: Rule-Based Cybersecurity Analyzer (active on 503/429/timeout)`);
     console.log(`Health check: http://localhost:${PORT}/api/health`);
     console.log(`Analysis endpoint: POST http://localhost:${PORT}/api/analyze`);
   });
