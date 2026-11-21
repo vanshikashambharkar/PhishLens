@@ -1,0 +1,15 @@
+{
+  "name": "phishlens-server",
+  "version": "1.0.0",
+  "description": "Backend API for PhishLens AI phishing and scam analyzer",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js"
+  },
+  "dependencies": {
+    "@google/genai": "^3.6.1",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2"
+  }
+}
